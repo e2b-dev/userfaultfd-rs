@@ -64,7 +64,10 @@ fn fault_handler_thread(uffd: Uffd) {
             fault_cnt += 1;
 
             let dst = (addr as usize & !(page_size - 1)) as *mut c_void;
-            let copy = unsafe { uffd.copy(page, dst, page_size, true).expect("uffd copy") };
+            let copy = unsafe {
+                uffd.copy(page, dst, page_size, true, false)
+                    .expect("uffd copy")
+            };
 
             println!("        (uffdio_copy.copy returned {})", copy);
         } else {

@@ -147,16 +147,23 @@ impl Uffd {
         dst: *mut c_void,
         len: usize,
         wake: bool,
+        wp: bool,
     ) -> Result<usize> {
+        let mut mode = 0;
+
+        if !wake {
+            mode |= raw::UFFDIO_COPY_MODE_DONTWAKE;
+        }
+
+        if wp {
+            mode |= raw::UFFDIO_COPY_MODE_WP;
+        }
+
         let mut copy = raw::uffdio_copy {
             src: src as u64,
             dst: dst as u64,
             len: len as u64,
-            mode: if wake {
-                0
-            } else {
-                raw::UFFDIO_COPY_MODE_DONTWAKE
-            },
+            mode,
             copy: 0,
         };
 
