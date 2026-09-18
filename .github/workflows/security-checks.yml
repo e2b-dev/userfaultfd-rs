@@ -1,0 +1,59 @@
+name: security checks
+
+# The branch takes direct pushes, which would otherwise weaken the scan with nothing running.
+on:
+  push:
+    branches: [feat_write_protection]
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/scripts/*"
+      - ".github/workflows/*"
+  # Unfiltered, so this can be a required check: a path-filtered one stays "Expected" forever.
+  pull_request:
+    branches: [feat_write_protection]
+
+permissions:
+  contents: read
+
+jobs:
+  security-workflow-shape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Check the security workflow"
+        run: python3 .github/scripts/security-workflow.test.py
+
+      - name: "Check the scan's exit-code gate"
+        run: bash .github/scripts/scan.test.sh
+
+      - name: "Check the analyses are read correctly"
+        run: bash .github/scripts/verify-analyses.test.sh
+
+      # The scripts moved out of the workflows, and actionlint only lints what is still inline.
+      - name: "Check the scripts"
+        env:
+          SHELLCHECK: koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d # v0.11.0
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$SHELLCHECK" \
+              --norc \
+              .github/scripts/scan.sh \
+              .github/scripts/scan.test.sh \
+              .github/scripts/verify-analyses.sh \
+              .github/scripts/verify-analyses.test.sh
+
+      # A file GitHub refuses runs nothing, which the check above cannot see: it has its own parser.
+      # No config file, because a checked-in one can switch every rule below off.
+      - name: "Check GitHub accepts them"
+        env:
+          LINTER: rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$LINTER" \
+              -no-color \
+              -config-file /dev/null \
+              .github/workflows/security.yml \
+              .github/workflows/security-checks.yml
