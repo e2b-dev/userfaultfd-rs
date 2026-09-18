@@ -15,8 +15,6 @@ import atexit  # noqa: E402
 import pathlib  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
-import subprocess  # noqa: E402
-import tempfile  # noqa: E402
 
 import yaml  # noqa: E402
 
@@ -36,7 +34,10 @@ WORKFLOW = ROOT / ".github" / "workflows" / "security.yml"
 
 # Named in both workflows too; retarget all four together or the test is red in between.
 BRANCH = "feat_write_protection"
-SCAN_PERMISSIONS = {"contents": "read", "actions": "read", "security-events": "write"}
+SCAN_PERMISSIONS = {
+    "codeql": {"contents": "read", "actions": "read", "security-events": "write"},
+    "osv": {"contents": "read", "actions": "read", "security-events": "write"},
+}
 PACKS = {
     "rust": "codeql/rust-queries:codeql-suites/rust-code-scanning.qls",
     "c-cpp": "codeql/cpp-queries:codeql-suites/cpp-code-scanning.qls",
@@ -49,8 +50,6 @@ ACTION_PINS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
     "github/codeql-action": "1c5b675653bb5c22dbe9b12b556ec555138e09fd",
 }
-LOCKFILE = "--lockfile=./Cargo.lock"
-NO_CONFIG = "--config=/dev/null"
 # Pinned by value: nothing bumps a docker reference in an env:, unlike the uses: SHAs above.
 SCANNER_REPO = "ghcr.io/google/osv-scanner"
 SCANNER_DIGEST = "sha256:afd838850ac1a0fcc15ff4a041dc9ba11123c3f0d2666217a5f0fcf9222b55fa"
@@ -75,7 +74,8 @@ JOB_STEPS = {
     "codeql": ("actions/checkout", "github/codeql-action/init", "github/codeql-action/analyze"),
     "osv": ("actions/checkout", "run", "run", "github/codeql-action/upload-sarif"),
 }
-RUNNER_STEPS = ("actions/checkout", "run", "run")
+# An action among these steps would be code no check here reads.
+RUNNER_STEPS = "actions/checkout"
 LINTER_REPO = "rhysd/actionlint"
 LINTER_DIGEST = "sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667"
 LINTER_BODY = """docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$LINTER" \\
@@ -87,24 +87,27 @@ RUNNER_OS = "ubuntu-latest"
 THIS = pathlib.Path(__file__).absolute().relative_to(ROOT).as_posix()
 STRATEGY_KEYS = {"fail-fast", "matrix"}
 MATRIX_KEYS = {"language", "include"}
-STEP_ENV = {"SCANNER", "LINTER"}
-# Pinned verbatim, because a body can read its environment and tell this test from a runner, so
-# executing it cannot speak for it. Executing the pinned text then proves the text behaves.
 GENERATE_BODY = 'cd "${RUNNER_TEMP:?}" && cargo generate-lockfile --manifest-path "${GITHUB_WORKSPACE:?}/Cargo.toml"'
-SCAN_BODY = """status=0
-docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$SCANNER" \\
-    scan source \\
-    --config=/dev/null \\
-    --lockfile=./Cargo.lock \\
-    --format=sarif \\
-    --output-file=results.sarif || status=$?
-case "$status" in
-    0 | 1) ;;
-    *)
-        echo "::error::OSV-Scanner exited $status; its results are not trustworthy"
-        exit 1
-        ;;
-esac"""
+SCAN_SCRIPT = ".github/scripts/scan.sh"
+SCRIPTS = pathlib.Path(__file__).absolute().parent
+TESTS = sorted(p.relative_to(ROOT).as_posix() for p in SCRIPTS.glob("*.test.*"))
+SHELL_SCRIPTS = sorted(p.relative_to(ROOT).as_posix() for p in SCRIPTS.glob("*.sh"))
+UNTESTED = [s for s in SHELL_SCRIPTS if not s.endswith(".test.sh") and s[:-3] + ".test.sh" not in TESTS]
+BESIDE = sorted(q.relative_to(ROOT).as_posix() for q in SCRIPTS.iterdir())
+EXPECTED_TESTS = [
+    ".github/scripts/scan.test.sh",
+    ".github/scripts/security-workflow.test.py",
+]
+SHELLCHECK_BODY = 'docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$SHELLCHECK" \\\n' + " \\\n".join(["    --norc"] + [f"    {script}" for script in SHELL_SCRIPTS])
+INTERPRETERS = {"sh": "bash", "py": "python3"}
+SHELLCHECK_REPO = "koalaman/shellcheck"
+SHELLCHECK_DIGEST = "sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d"
+# Keyed by what the step runs: one of these switches discards the upload.
+STEP_ENV = {
+    SCAN_SCRIPT: {"SCANNER"},
+    '"$LINTER"': {"LINTER"},
+    '"$SHELLCHECK"': {"SHELLCHECK"},
+}
 INIT_KEYS = {"languages", "build-mode", "config"}
 ANALYZE_KEYS = {"category"}
 # Pinned: another ${{ }} naming matrix.language reads as per-language but resolves to one.
@@ -116,9 +119,6 @@ INTERVALS = {"daily", "weekly", "monthly"}
 # rejected, so a time: or timezone: is not allowed here until something quotes one.
 SCHEDULE_KEYS = {"interval", "day"}
 DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
-# 0 no vulnerabilities, 1 vulnerabilities found; every other code leaves results we cannot trust.
-ACCEPTED_EXITS = [0, 1]
-REJECTED_EXITS = [2, 126, 127, 128, 129, 130]
 
 failures = []
 
@@ -139,7 +139,7 @@ atexit.register(lambda: failures and not reached_the_end and report())
 
 class Strict(yaml.SafeLoader):
     """GitHub reads a key as the text it is written with, refuses a file that repeats one in any
-    casing, and expands nothing. PyYAML folds bare `on:` to True, keeps the last of a duplicate
+    casing, and refuses a merge key. PyYAML folds bare `on:` to True, keeps the last of a duplicate
     pair, and expands `<<`, so the allowlists below would be describing a file GitHub will not run."""
 
     def construct_mapping(self, node, deep=False):
@@ -157,9 +157,7 @@ class Strict(yaml.SafeLoader):
 
 
 def to_int(text):
-    body = text.removeprefix("+")
-    base = {"0x": 16, "0o": 8}.get(body[:2].lower(), 10)
-    return int(body, base)
+    return int(text.removeprefix("+"))
 
 
 def to_float(text):
@@ -176,7 +174,7 @@ def to_float(text):
 # by hand.
 SCALARS = (
     ("bool", r"true|True|TRUE|false|False|FALSE", "tTfF", lambda t: t.lower() == "true"),
-    ("int", r"[0-9]+|[-+][0-9]+|0x[0-9a-fA-F]+|0o[0-7]+", "-+0123456789", to_int),
+    ("int", r"[0-9]+|[-+][0-9]+", "-+0123456789", to_int),
     (
         "float",
         r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
@@ -236,14 +234,15 @@ def globs_of(spec, key):
     return [value] if isinstance(value, str) else value
 
 
-def launches(body):
-    """Whether a run: body executes this file under the interpreter it is pinned to, rather than
+def launches(body, script=None):
+    """Whether a run: body executes this script under the interpreter it is pinned to, rather than
     merely naming it — a `cat` does not, and a bare path would read a shebang nothing here checks."""
+    script = script or THIS
     try:
         argv = shlex.split(body.replace("\\\n", "").strip())
     except ValueError:
         return False
-    return argv == ["python3", THIS]
+    return argv == [INTERPRETERS[script.rsplit(".", 1)[-1]], script]
 
 
 triggers = workflow.get("on")
@@ -315,10 +314,11 @@ def shape(where, steps):
             f"{where}: step {step.get('name')!r} names itself with a {type(step.get('name')).__name__} "
             f"and sets a {type(step.get('env', {})).__name__}; GitHub wants a string and a mapping",
         )
+        allowed = {n for marker, names in STEP_ENV.items() if marker in str(step.get("run", "")) for n in names}
         check(
-            set(step.get("env") or {}) <= STEP_ENV,
-            f"{where}: step {step.get('name')!r} sets {sorted(set(step.get('env') or {}) - STEP_ENV)}; "
-            f"only {sorted(STEP_ENV)} are read here, and the actions in this file take switches from "
+            set(step.get("env") or {}) <= allowed,
+            f"{where}: step {step.get('name')!r} sets {sorted(set(step.get('env') or {}) - allowed)}; "
+            f"only {sorted(allowed)} are read by what it runs, and the actions in this file take switches from "
             "the environment, one of which discards the upload",
         )
 
@@ -339,21 +339,8 @@ for event in ("push", "pull_request"):
     )
 
 def weekly(fields):
-    """A five-field cron, every field in range, that comes round at least once a week."""
-    if len(fields) != 5 or fields[2] != "*" or fields[3] != "*":
-        return False
-    for field, (low, high) in zip(fields, ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))):
-        for item in field.split(","):
-            values, _, step = item.partition("/")
-            if step and not step.isdigit():
-                return False
-            if values == "*":
-                continue
-            if not re.fullmatch(r"\d+(-\d+)?", values):
-                return False
-            if not all(low <= int(n) <= high for n in values.split("-")):
-                return False
-    return True
+    """A five-field cron that comes round at least once a week; actionlint has the field ranges."""
+    return len(fields) == 5 and fields[2] == "*" and fields[3] == "*"
 
 
 def minutes(value):
@@ -370,9 +357,8 @@ def minutes(value):
 crons = [str(s.get("cron", "")).split() for s in triggers.get("schedule", [])]
 check(
     crons and all(weekly(c) for c in crons),
-    f"every schedule has to be a five-field cron in range that fires at least weekly, written in "
-    f"numbers rather than the day and month names GitHub also takes, so the interval it comes "
-    f"round on can be read here; these are {[' '.join(c) for c in crons]}",
+    f"every schedule has to be a five-field cron whose day-of-month and month are both *, so it "
+    f"comes round at least weekly; these are {[' '.join(c) for c in crons]}",
 )
 
 for required in ("codeql", "osv"):
@@ -391,7 +377,7 @@ for name, job in jobs.items():
         continue
     check(set(job) == JOB_KEYS[name], f"{name}: the job takes {sorted(job)}, not {sorted(JOB_KEYS[name])}")
     perms = job.get("permissions")
-    check(perms == SCAN_PERMISSIONS, f"{name}: permissions are {perms}, not {SCAN_PERMISSIONS}")
+    check(perms == SCAN_PERMISSIONS[name], f"{name}: permissions are {perms}, not {SCAN_PERMISSIONS[name]}")
     check(job.get("runs-on") == RUNNER_OS, f"{name}: runs on {job.get('runs-on')!r}, not {RUNNER_OS}")
     timeout = job.get("timeout-minutes")
     check(not minutes(timeout), f"{name}: timeout-minutes is {timeout!r}; {minutes(timeout)}")
@@ -472,7 +458,7 @@ check(
 
 osv_steps = jobs["osv"]["steps"]
 gen_i = next((i for i, s in enumerate(osv_steps) if "generate-lockfile" in str(s.get("run", ""))), None)
-scan_i = next((i for i, s in enumerate(osv_steps) if "docker run" in str(s.get("run", ""))), None)
+scan_i = next((i for i, s in enumerate(osv_steps) if SCAN_SCRIPT in str(s.get("run", ""))), None)
 check(gen_i is not None, "osv: no cargo generate-lockfile step; the crate ships no lockfile")
 if gen_i is not None:
     check(
@@ -480,15 +466,15 @@ if gen_i is not None:
         f"osv: the lockfile step runs {osv_steps[gen_i]['run'].strip()!r}, not {GENERATE_BODY!r} — "
         "anything more can replace the lockfile the scan is about to read",
     )
-check(scan_i is not None, "osv: no scanner invocation")
+check(scan_i is not None, f"osv: no step runs {SCAN_SCRIPT}")
 if gen_i is not None and scan_i is not None:
     check(gen_i < scan_i, "osv: the lockfile is generated after the scan has already read it")
 
 scan_run = osv_steps[scan_i]["run"] if scan_i is not None else ""
 check(
-    scan_run.strip() == SCAN_BODY,
-    "osv: the scan body is not the pinned text; a real scan followed by one more line can blank the "
-    "results, and a body that reads its environment can tell this test from a runner",
+    launches(scan_run, SCAN_SCRIPT),
+    f"osv: the scan step runs {scan_run.strip()!r}; it has to run {SCAN_SCRIPT} and nothing else, "
+    "because a second line can blank the results the gate just vouched for",
 )
 
 scanner = (osv_steps[scan_i].get("env") or {}).get("SCANNER") if scan_i is not None else None
@@ -505,57 +491,6 @@ if scanner is not None:
         f"osv: the scan pulls {scanner!r}, not {SCANNER_REPO} at {SCANNER_DIGEST}; a digest names one "
         "exact image, so changing it here means changing what runs over the workspace",
     )
-
-# Executed, not matched: text cannot show which codes the gate lets through or what docker gets.
-if scan_i is not None and scanner and scan_run.strip() == SCAN_BODY:
-    with tempfile.TemporaryDirectory() as tmp:
-        argv_log = pathlib.Path(tmp) / "argv"
-        stub = pathlib.Path(tmp) / "docker"
-        stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {argv_log}\nexit "${{STUB_RC:-0}}"\n')
-        stub.chmod(0o755)
-        for rc in ACCEPTED_EXITS + REJECTED_EXITS:
-            # `run:` without a shell: runs as bash -e on the runners, with no pipefail.
-            proc = subprocess.run(
-                ["bash", "-e", "-c", scan_run],
-                env={"PATH": f"{tmp}:/usr/bin:/bin", "STUB_RC": str(rc), "GITHUB_WORKSPACE": tmp, "SCANNER": scanner},
-                capture_output=True,
-                text=True,
-            )
-            expected = 0 if rc in ACCEPTED_EXITS else 1
-            check(
-                proc.returncode == expected,
-                f"osv: a scanner exit of {rc} left the step at {proc.returncode}, expected {expected}",
-            )
-
-        if not argv_log.is_file():
-            check(False, "osv: the scan step never invoked docker, so there is no argv to check")
-            argv = []
-        else:
-            argv = argv_log.read_text().splitlines()
-        at = argv.index("scan") if "scan" in argv else -1
-        check(at > 0, f"osv: docker is not invoked with a scan subcommand: {argv}")
-        if at > 0:
-            opts = argv[: at - 1]
-            check(argv[0] == "run" and "--rm" in opts, f"osv: docker is invoked as {argv[:2]}, not a disposable run")
-            mounts = [opts[j + 1] for j, a in enumerate(opts) if a == "--volume" and j + 1 < len(opts)]
-            check(
-                mounts == [f"{tmp}:{tmp}"],
-                f"osv: the tree is mounted as {mounts}; the scanner must see it where the checkout is "
-                "or every alert lands on a path that does not exist, and it must see nothing else",
-            )
-            check(
-                "--workdir" in opts and opts[opts.index("--workdir") + 1] == tmp,
-                f"osv: the scanner does not run from the workspace: {opts}",
-            )
-            check(
-                re.fullmatch(r"ghcr\.io/google/osv-scanner(:[\w.-]+)?@sha256:[0-9a-f]{64}", argv[at - 1]),
-                f"osv: the image docker receives is not pinned by digest: {argv[at - 1]!r}",
-            )
-            check(
-                argv[at : at + 2] == ["scan", "source"]
-                and set(argv[at + 2 :]) == {NO_CONFIG, LOCKFILE, "--format=sarif", f"--output-file={RESULTS_FILE}"},
-                f"osv: the scanner is invoked as {argv[at:]}, not a SARIF scan of {LOCKFILE} into {RESULTS_FILE}",
-            )
 
 try:
     dependabot = load((ROOT / ".github" / "dependabot.yml").read_text())
@@ -744,8 +679,48 @@ for file_name, doc, job_name, job, step in runners:
     )
     steps = job.get("steps") or []
     check(
-        signature(steps) == RUNNER_STEPS,
-        f"{where}: its steps are {list(signature(steps))}, not {list(RUNNER_STEPS)}",
+        signature(steps)[:1] == (RUNNER_STEPS,) and set(signature(steps)[1:]) <= {"run"},
+        f"{where}: its steps are {list(signature(steps))}, not {RUNNER_STEPS} followed by commands",
+    )
+    check(not UNTESTED, f"{where}: {UNTESTED} have no sibling test, so deleting one is silent")
+    check(
+        BESIDE == sorted(set(TESTS) | set(SHELL_SCRIPTS)),
+        f"{where}: {sorted(set(BESIDE) - set(TESTS) - set(SHELL_SCRIPTS))} sit beside these scripts "
+        "and are neither run nor linted, and a script can source one",
+    )
+    check(
+        TESTS == EXPECTED_TESTS,
+        f"{where}: the tests beside this file are {TESTS}, not {EXPECTED_TESTS}; a step added for a "
+        "new one runs before these and can leave them asserting what it just wrote",
+    )
+    for test in TESTS:
+        check(
+            any(launches(str(st.get("run", "")), test) for st in steps),
+            f"{where}: no step runs {test}, so what it asserts is not what any check reports",
+        )
+    # The bodies are an allowlist too: another step runs before these and can rewrite them.
+    for step in steps[1:]:
+        body = str(step.get("run", "")).strip()
+        check(
+            body in (LINTER_BODY, SHELLCHECK_BODY) or any(launches(body, test) for test in TESTS),
+            f"{where}: step {step.get('name')!r} runs {body.splitlines()[:1]}, which is neither a "
+            "test beside this file nor one of the two pinned lints",
+        )
+    lint_scripts = next((st for st in steps if "SHELLCHECK" in (st.get("env") or {})), {})
+    check(
+        str(lint_scripts.get("run", "")).strip() == SHELLCHECK_BODY,
+        f"{where}: the script-lint body is not the pinned text, so what it lints is not what it names",
+    )
+    shellcheck = (lint_scripts.get("env") or {}).get("SHELLCHECK", "")
+    repo, _, digest = str(shellcheck).partition("@")
+    check(
+        repo.split(":")[0] == SHELLCHECK_REPO and digest == SHELLCHECK_DIGEST,
+        f"{where}: the script lint pulls {shellcheck!r}, not {SHELLCHECK_REPO} at {SHELLCHECK_DIGEST}",
+    )
+    check(
+        re.search(rf"^\s*SHELLCHECK:\s*{re.escape(str(shellcheck))}\s+#\s*v\d", doc_text, re.M),
+        f"{where}: the script-lint pin carries no version comment, so no reader can tell which "
+        "release it is",
     )
     lint = next((st for st in steps if "LINTER" in (st.get("env") or {})), {})
     check(

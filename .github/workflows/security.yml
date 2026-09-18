@@ -65,31 +65,14 @@ jobs:
       - name: "Generate the lockfile"
         run: cd "${RUNNER_TEMP:?}" && cargo generate-lockfile --manifest-path "${GITHUB_WORKSPACE:?}/Cargo.toml"
 
-      # No config file, because one checked in beside the lockfile turns the scan into a clean
-      # zero-result run. An unreachable api.osv.dev still yields a zero-result SARIF that would close every open
-      # alert, so only the exit code separates a clean scan from a dead one. Unwrapped because
-      # the published action pins its image by tag, not by digest.
       - name: "Scan the lockfile"
         env:
           SCANNER: ghcr.io/google/osv-scanner@sha256:afd838850ac1a0fcc15ff4a041dc9ba11123c3f0d2666217a5f0fcf9222b55fa # v2.6.0
-        run: |
-          status=0
-          docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$SCANNER" \
-              scan source \
-              --config=/dev/null \
-              --lockfile=./Cargo.lock \
-              --format=sarif \
-              --output-file=results.sarif || status=$?
-          case "$status" in
-              0 | 1) ;;
-              *)
-                  echo "::error::OSV-Scanner exited $status; its results are not trustworthy"
-                  exit 1
-                  ;;
-          esac
+        run: bash .github/scripts/scan.sh
 
       - name: "Upload the OSV results"
         uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
         with:
           sarif_file: results.sarif
           category: osv-scanner
+
