@@ -24,6 +24,19 @@ jobs:
     - name: Check the security workflow
       run: python3 .github/scripts/security-workflow.test.py
 
+    - name: Check the scan's exit-code gate
+      run: bash .github/scripts/scan.test.sh
+
+    # actionlint reads only the run: bodies left inline, so the extracted scripts need their own.
+    - name: Check the scripts
+      env:
+        SHELLCHECK: koalaman/shellcheck@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d # v0.11.0
+      run: |
+        docker run --rm --user "$(id -u):$(id -g)" --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" --workdir "$GITHUB_WORKSPACE" "$SHELLCHECK" \
+            --norc \
+            .github/scripts/scan.sh \
+            .github/scripts/scan.test.sh
+
     # A file GitHub refuses runs nothing, which the check above cannot see: it has its own parser.
     # No config file, because a checked-in one can switch every rule below off.
     - name: Check GitHub accepts them
