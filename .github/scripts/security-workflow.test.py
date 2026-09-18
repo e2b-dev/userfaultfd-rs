@@ -37,6 +37,8 @@ BRANCH = "feat_write_protection"
 SCAN_PERMISSIONS = {
     "codeql": {"contents": "read", "actions": "read", "security-events": "write"},
     "osv": {"contents": "read", "actions": "read", "security-events": "write"},
+    # Reads what the two above wrote; write here would let this job close what it is checking.
+    "verify": {"contents": "read", "security-events": "read"},
 }
 PACKS = {
     "rust": "codeql/rust-queries:codeql-suites/rust-code-scanning.qls",
@@ -67,12 +69,14 @@ RUNNER_EVENTS = {"push", "pull_request"}
 JOB_KEYS = {
     "codeql": {"runs-on", "timeout-minutes", "permissions", "strategy", "steps"},
     "osv": {"runs-on", "timeout-minutes", "permissions", "steps"},
+    "verify": {"runs-on", "timeout-minutes", "permissions", "needs", "if", "steps"},
 }
 RUNNER_JOB_KEYS = {"runs-on", "timeout-minutes", "steps"}
 STEP_SHAPES = ({"name", "uses", "with"}, {"name", "run"}, {"name", "run", "env"})
 JOB_STEPS = {
     "codeql": ("actions/checkout", "github/codeql-action/init", "github/codeql-action/analyze"),
     "osv": ("actions/checkout", "run", "run", "github/codeql-action/upload-sarif"),
+    "verify": ("actions/checkout", "run"),
 }
 # An action among these steps would be code no check here reads.
 RUNNER_STEPS = "actions/checkout"
@@ -89,6 +93,7 @@ STRATEGY_KEYS = {"fail-fast", "matrix"}
 MATRIX_KEYS = {"language", "include"}
 GENERATE_BODY = 'cd "${RUNNER_TEMP:?}" && cargo generate-lockfile --manifest-path "${GITHUB_WORKSPACE:?}/Cargo.toml"'
 SCAN_SCRIPT = ".github/scripts/scan.sh"
+VERIFY_SCRIPT = ".github/scripts/verify-analyses.sh"
 SCRIPTS = pathlib.Path(__file__).absolute().parent
 TESTS = sorted(p.relative_to(ROOT).as_posix() for p in SCRIPTS.glob("*.test.*"))
 SHELL_SCRIPTS = sorted(p.relative_to(ROOT).as_posix() for p in SCRIPTS.glob("*.sh"))
@@ -97,6 +102,7 @@ BESIDE = sorted(q.relative_to(ROOT).as_posix() for q in SCRIPTS.iterdir())
 EXPECTED_TESTS = [
     ".github/scripts/scan.test.sh",
     ".github/scripts/security-workflow.test.py",
+    ".github/scripts/verify-analyses.test.sh",
 ]
 SHELLCHECK_BODY = 'docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$SHELLCHECK" \\\n' + " \\\n".join(["    --norc"] + [f"    {script}" for script in SHELL_SCRIPTS])
 INTERPRETERS = {"sh": "bash", "py": "python3"}
@@ -105,6 +111,7 @@ SHELLCHECK_DIGEST = "sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf9
 # Keyed by what the step runs: one of these switches discards the upload.
 STEP_ENV = {
     SCAN_SCRIPT: {"SCANNER"},
+    VERIFY_SCRIPT: {"GH_TOKEN", "REF", "SHA", "EXPECTED"},
     '"$LINTER"': {"LINTER"},
     '"$SHELLCHECK"': {"SHELLCHECK"},
 }
@@ -112,6 +119,7 @@ INIT_KEYS = {"languages", "build-mode", "config"}
 ANALYZE_KEYS = {"category"}
 # Pinned: another ${{ }} naming matrix.language reads as per-language but resolves to one.
 ANALYZE_CATEGORY = "/language:${{ matrix.language }}"
+VERIFY_IF = "${{ !cancelled() }}"
 UPLOAD_KEYS = {"sarif_file", "category"}
 UPDATE_KEYS = {"package-ecosystem", "directory", "schedule"}
 INTERVALS = {"daily", "weekly", "monthly"}
@@ -455,6 +463,36 @@ check(
     f"{RESULTS_FILE!r} the scan is told to write",
 )
 
+
+verify_steps = jobs["verify"]["steps"] if "verify" in jobs else []
+check(
+    jobs.get("verify", {}).get("needs") == ["codeql", "osv"],
+    f"verify: it needs {jobs.get('verify', {}).get('needs')}, not ['codeql', 'osv'] — reading the "
+    "analyses before both uploads have finished would report an empty set as a missing scan",
+)
+check(
+    expr(jobs.get("verify", {}).get("if")) == VERIFY_IF,
+    f"verify: it runs if {jobs.get('verify', {}).get('if')!r}, so a failed scan skips it and the "
+    "skip reports success to whatever requires it",
+)
+verify_step = next((st for st in verify_steps if launches(str(st.get("run", "")), VERIFY_SCRIPT)), None)
+check(verify_step is not None, f"verify: no step runs {VERIFY_SCRIPT}, so nothing reads what was uploaded")
+if verify_step is not None:
+    env = verify_step.get("env") or {}
+    check(
+        set(str(env.get("EXPECTED", "")).split()) == CATEGORIES,
+        f"verify: it expects {str(env.get('EXPECTED', '')).split()}, not {sorted(CATEGORIES)}; the "
+        "categories it waits for are what makes a missing or merged upload visible",
+    )
+    check(
+        expr(env.get("SHA")) == "${{ github.sha }}",
+        f"verify: it reads the analyses of {env.get('SHA')!r}, not the commit this run scanned",
+    )
+    # Already refs/pull/<n>/merge on a pull request, which is where those analyses are filed.
+    check(
+        expr(env.get("REF")) == "${{ github.ref }}",
+        f"verify: it reads the analyses of {env.get('REF')!r}, not the ref this run scanned",
+    )
 
 osv_steps = jobs["osv"]["steps"]
 gen_i = next((i for i, s in enumerate(osv_steps) if "generate-lockfile" in str(s.get("run", ""))), None)

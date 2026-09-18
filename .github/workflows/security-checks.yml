@@ -31,6 +31,9 @@ jobs:
       - name: "Check the scan's exit-code gate"
         run: bash .github/scripts/scan.test.sh
 
+      - name: "Check the analyses are read correctly"
+        run: bash .github/scripts/verify-analyses.test.sh
+
       # The scripts moved out of the workflows, and actionlint only lints what is still inline.
       - name: "Check the scripts"
         env:
@@ -39,7 +42,9 @@ jobs:
           docker run --rm --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" --workdir "$GITHUB_WORKSPACE" "$SHELLCHECK" \
               --norc \
               .github/scripts/scan.sh \
-              .github/scripts/scan.test.sh
+              .github/scripts/scan.test.sh \
+              .github/scripts/verify-analyses.sh \
+              .github/scripts/verify-analyses.test.sh
 
       # A file GitHub refuses runs nothing, which the check above cannot see: it has its own parser.
       # No config file, because a checked-in one can switch every rule below off.
