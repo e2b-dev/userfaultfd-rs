@@ -22,7 +22,7 @@ jobs:
         runner: [ ubuntu-latest, ubuntu-20.04 ]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v7
 
     # Keep this step, so that we can check that the Linux kernel is the one we
     # expect, depending on the runner kernel.
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v7
     - name: Install Cargo Audit
       run: cargo install cargo-audit
     - name: Audit
