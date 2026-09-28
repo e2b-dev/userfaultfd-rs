@@ -121,7 +121,8 @@ UPLOAD_KEYS = {"sarif_file", "category"}
 # lockfile owning dependency versions.
 DEPENDABOT = {
     "version": 2,
-    "updates": [{"package-ecosystem": "github-actions", "directory": "/", "schedule": {"interval": "weekly", "day": "monday"}}],
+    "updates": [{"package-ecosystem": "github-actions", "directory": "/", "schedule": {"interval": "weekly", "day": "monday"},
+                 "groups": {"actions": {"patterns": ["*"]}}}],
 }
 
 failures = []
