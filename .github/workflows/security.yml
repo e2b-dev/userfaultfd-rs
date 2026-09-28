@@ -1,0 +1,100 @@
+name: Security
+
+on:
+  push:
+    branches: [ feat_write_protection ]
+  pull_request:
+    branches: [ feat_write_protection ]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ rust, c-cpp ]
+        include:
+          - language: rust
+            pack: codeql/rust-queries:codeql-suites/rust-code-scanning.qls
+          - language: c-cpp
+            pack: codeql/cpp-queries:codeql-suites/cpp-code-scanning.qls
+    steps:
+    - name: Checkout the scanned commit
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: none
+        config: |
+          disable-default-queries: true
+          packs:
+            - ${{ matrix.pack }}
+
+    - name: Analyze
+      uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      with:
+        category: "/language:${{ matrix.language }}"
+
+  osv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+    - name: Checkout the scanned commit
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    # .gitignore excludes Cargo.lock, so there is one to generate. Resolved outside the
+    # checkout: cargo reads .cargo/config.toml and rust-toolchain.toml from where it runs.
+    - name: Generate the lockfile
+      run: cd "${RUNNER_TEMP:?}" && cargo generate-lockfile --manifest-path "${GITHUB_WORKSPACE:?}/Cargo.toml"
+
+    - name: Scan the lockfile
+      env:
+        SCANNER: ghcr.io/google/osv-scanner@sha256:afd838850ac1a0fcc15ff4a041dc9ba11123c3f0d2666217a5f0fcf9222b55fa # v2.6.0
+      run: bash .github/scripts/scan.sh
+
+    - name: Upload the OSV results
+      uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      with:
+        sarif_file: results.sarif
+        category: osv-scanner
+
+  verify:
+    needs: [ codeql, osv ]
+    # Skipped when a scan fails without this, and a skipped job reports success to a required check.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+    - name: Checkout the scanned commit
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Check the analyses reached code scanning
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REF: ${{ github.ref }}
+        SHA: ${{ github.sha }}
+        EXPECTED: "/language:rust /language:c-cpp osv-scanner"
+      run: bash .github/scripts/verify-analyses.sh
