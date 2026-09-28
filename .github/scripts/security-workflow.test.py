@@ -46,7 +46,7 @@ CATEGORIES = {f"/language:{language}" for language in PACKS} | {"osv-scanner"}
 # reproduced on this one — so a 40-hex that looks like an upstream release fetches what that fork wrote.
 ACTION_PINS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
-    "github/codeql-action": "1c5b675653bb5c22dbe9b12b556ec555138e09fd",
+    "github/codeql-action": "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
 }
 # Pinned by value: nothing bumps a docker reference in an env:, unlike the uses: SHAs above.
 SCANNER_REPO = "ghcr.io/google/osv-scanner"
